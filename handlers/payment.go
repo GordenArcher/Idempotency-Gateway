@@ -30,7 +30,7 @@ func (h *PaymentHandler) ProcessPayment(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
-			"error": "invalid request body — expected {amount, currency}",
+			"error": "invalid request body, expected {amount, currency}",
 		})
 		return
 	}
