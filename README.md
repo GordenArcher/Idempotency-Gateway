@@ -1,133 +1,293 @@
-# Idempotency-Gateway (The "Pay-Once" Protocol)
-This challenge is designed to test your ability to bridge Computer Science fundamentals with Modern Backend Engineering.
+# Idempotency Gateway
+A payment processing API that guarantees every transaction is executed **exactly once** — no matter how many times the client retries.
 
-## 1. Business Context
-> **Client:** *FinSafe Transactions Ltd.* (A fast-growing Payment Processor).
-
-### The Problem
-FinSafe's clients (e-commerce shops) occasionally experience network timeouts. When this happens, their servers automatically retry sending payment requests. Recently, this has led to a critical issue: **Double Charging**.
-
-If a customer clicks "Pay," the request is sent, but the network lags. The client retries the request. FinSafe processes *both* requests, charging the customer twice. This is causing customer churn and regulatory headaches.
-
-### The Solution
-FinSafe needs you to build an **Idempotency Layer**. This is a middleware service (or API) that ensures no matter how many times a client sends the same request, the payment is processed **exactly once**.
+Built in Go. No external dependencies. Zero infrastructure required.
 
 ---
 
-## 2. Technical Objective
-Build a RESTful API that mimics a payment processing backend. It must check for a unique `Idempotency-Key` in the HTTP headers.
-
-* **First Request:** Process the payment and save the response.
-* **Duplicate Request:** Detect the existing key and return the *saved* response immediately, without processing the payment again.
-
-
----
-
-## 3. Getting Started
-
-1.  **Fork this Repository:** Do not clone it directly. Create a fork to your own GitHub account.
-2.  **Environment:** You may use **Node.js, Python, Java or Go, etc.**. You may use any database or in-memory store (Redis, SQLite, or a simple native Map/Dictionary variable).
-3.  **Submission:** Your final submission will be a link to your forked repository containing the source code and documentation.
+## Table of Contents
+1. [Architecture Diagram](#architecture-diagram)
+2. [Setup Instructions](#setup-instructions)
+3. [API Documentation](#api-documentation)
+4. [Design Decisions](#design-decisions)
+5. [Developer's Choice Feature](#developers-choice-feature)
 
 ---
 
-## 4. The Architecture Diagram 
-**Task:** Before you write any code, you must design the logic flow.
-**Deliverable:** A **Sequence Diagram** or **Flowchart** included in your README.
+## Architecture Diagram
+
+### Sequence Diagram — Full Request Lifecycle
+
+```
+Client                 Middleware                    Store                  Handler
+  │                       │                            │                       │
+  │                       │                            │                       │
+  │  ── POST /process ──▶ │                            │                       │
+  │     Idempotency-Key:  │                            │                       │
+  │     "key-abc"         │                            │                       │
+  │                       │ ── Get("key-abc") ───────▶ │                       │
+  │                       │ ◀── nil (not found) ─────  │                       │
+  │                       │                            │                       │
+  │                       │ ── Set("key-abc",          │                       │
+  │                       │    PROCESSING) ──────────▶ │                       │
+  │                       │                            │                       │
+  │                       │ ────────────────────────────────── ServeHTTP() ──▶ │
+  │                       │                            │      (2s delay)       │
+  │                       │ ◀───────────────────────────────── 201 Created ─── │
+  │                       │                            │                       │
+  │                       │ ── Set("key-abc",          │                       │
+  │                       │    COMPLETE + body) ─────▶ │                       │
+  │ ◀── 201 Created ───── │                            │                       │
+  │                       │                            │                       │
+  │                       │                            │                       │
+  │  ── POST /process ──▶ │        (retry, same key + same body)               │
+  │     Idempotency-Key:  │                            │                       │
+  │     "key-abc"         │ ── Get("key-abc") ───────▶ │                       │
+  │                       │ ◀── COMPLETE, cached ───── │                       │
+  │ ◀── 201 +            │                            │                       │
+  │     X-Cache-Hit:true  │       (instant, no handler call, no 2s delay)      │
+  │                       │                            │                       │
+```
+
+### Flowchart — Middleware Decision Logic
+
+```
+                    Incoming POST /process-payment
+                                │
+                    ┌───────────▼───────────┐
+                    │  Idempotency-Key       │
+                    │  header present?       │
+                    └───────────┬───────────┘
+                         No ◀──┴──▶ Yes
+                         │              │
+                    400 Bad         Check Store
+                    Request              │
+                              ┌──────────┴──────────┐
+                              │                     │
+                         Not Found              Key Exists
+                              │                     │
+                     Mark PROCESSING         ┌──────┴───────┐
+                     Call Handler       PROCESSING       COMPLETE
+                     Cache result           │                │
+                     Mark COMPLETE      Wait on         Body hash
+                     Return 201         sync.Cond        match?
+                                            │           ┌───┴───┐
+                                        Wake up        Yes      No
+                                        return          │        │
+                                        cached      Replay   409 Conflict
+                                        result      cached
+                                    X-Cache-Hit:   response
+                                        true     X-Cache-Hit:
+                                                    true
+```
 
 ---
 
-## 5. User Stories & Acceptance Criteria
+## Setup Instructions
 
-### User Story 1: The First Transaction (Happy Path)
-**As a** client system (e.g., an online store),  
-**I want to** send a payment request with a unique ID,  
-**So that** my transaction is processed successfully.
+### Prerequisites
+- Go 1.22 or higher
 
-**Acceptance Criteria:**
-- [ ] The API accepts a `POST` request to endpoint `/process-payment`.
-- [ ] The request header must contain `Idempotency-Key: <some-unique-string>`.
-- [ ] The request body accepts a JSON object (e.g., `{"amount": 100, "currency": "GHS"}`).
-- [ ] The server simulates processing (e.g., a 2-second delay) and returns a `200 OK` or `201 Created` response.
-- [ ] The response body should include a status message: `"Charged 100 GHS"`.
+### Run the server
 
-### User Story 2: The Duplicate Attempt (Idempotency Logic)
-**As a** client system,  
-**I want to** safely retry a request if I don't hear back,  
-**So that** I don't accidentally double-charge the user.
+```bash
+# Clone the repo
+git clone https://github.com/GordenArcher/Idempotency-Gateway.git
+cd Idempotency-Gateway
 
-**Acceptance Criteria:**
-- [ ] If the client sends a second `POST` request with the **same** `Idempotency-Key` and payload:
-    - [ ] The server must **NOT** run the processing logic again (no 2-second delay).
-    - [ ] The server must return the **exact same** response body and status code as the first successful request.
-    - [ ] The server returns a header `X-Cache-Hit: true` to indicate this was a replayed response.
+# Start the server
+go run .
+```
 
-### User Story 3: Different Request, Same Key (Fraud/Error Check)
-**As a** security officer,  
-**I want to** reject requests that reuse keys for different payments,  
-**So that** we maintain data integrity.
+Server starts on `http://localhost:8080`. That's it — no Docker, no database, no environment variables needed.
 
-**Acceptance Criteria:**
-- [ ] If a request arrives with an existing `Idempotency-Key` but a **different** request body (e.g., changing amount from 100 to 500):
-    - [ ] The server must return a `422 Unprocessable Entity` or `409 Conflict` error.
-    - [ ] The error message should state: `"Idempotency key already used for a different request body."`
+### Run with a custom port (optional)
+The port is set in `config/config.go`. Change `Port: ":8080"` to whatever you need and re-run.
 
 ---
 
-## 6. Bonus User Story (The "In-Flight" Check)
-**As a** system architect,  
-**I want to** handle cases where two identical requests arrive at the exact same time,  
-**So that** we don't succumb to race conditions.
+## API Documentation
 
-**Scenario:** Request A arrives. While Request A is still "processing" (during the 2-second delay), Request B (same key) arrives.
+### `POST /process-payment`
 
-**Acceptance Criteria:**
-- [ ] Request B should not start a new process.
-- [ ] Request B should not return `409 Conflict`.
-- [ ] Request B should wait (block) until Request A finishes, and then return the result of Request A.
+Processes a payment. Guaranteed to execute exactly once per unique `Idempotency-Key`.
+
+#### Request
+
+| Part | Key | Value |
+|---|---|---|
+| Header | `Idempotency-Key` | Any unique string (UUID recommended) |
+| Header | `Content-Type` | `application/json` |
+| Body | `amount` | Positive number |
+| Body | `currency` | Currency code string (e.g. `"GHS"`) |
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:8080/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+---
+
+### Response Reference
+
+#### `201 Created` — First successful request
+
+```json
+{
+  "status": "success",
+  "message": "Charged 100.00 GHS",
+  "amount": 100,
+  "currency": "GHS"
+}
+```
+
+> Takes ~2 seconds (simulated processing delay).
 
 ---
 
-## 7. The "Developer's Choice" Challenge
-We believe great engineers are also product thinkers.
+#### `201 Created` — Duplicate request (same key, same body)
 
-**Task:** Identify **one** additional feature or safety mechanism that would make this system better for a real-world Fintech company.
-1.  **Implement it.**
-2.  **Document it:** Explain *why* you added it in your README.
+Same response body as above, but instant. Look for the extra header:
+
+```
+X-Cache-Hit: true
+```
+
+> Returns immediately — no processing delay.
+
+---
+
+#### `409 Conflict` — Same key, different body
+
+```json
+{
+  "error": "Idempotency key already used for a different request body."
+}
+```
+
+Triggered when a client reuses an `Idempotency-Key` with a different `amount` or `currency`.
 
 ---
 
-## 8. Documentation Requirements
-Your final `README.md` must replace these instructions. It must cover:
+#### `400 Bad Request` — Missing header
 
-1.  **Architecture Diagram**
-2.  **Setup Instructions**
-3.  **API Documentation** 
-4.  **Design Decisions** 
-5.  **The Developer's Choice:** Description of the extra feature you added.
-
----
-Submit your repo link via the [online](https://forms.office.com/e/rGKtfeZCsH) form.
+```json
+{
+  "error": "missing Idempotency-Key header"
+}
+```
 
 ---
-## 🛑 Pre-Submission Checklist
-**WARNING:** Before you submit your solution, you **MUST** pass every item on this list.
-If you miss any of these critical steps, your submission will be **automatically rejected** and you will **NOT** be invited to an interview.
 
-### 1. 📂 Repository & Code
-- [ ] **Public Access:** Is your GitHub repository set to **Public**? (We cannot review private repos).
-- [ ] **Clean Code:** Did you remove unnecessary files (like `node_modules`, `.env` with real keys, or `.DS_Store`)?
-- [ ] **Run Check:** if we clone your repo and run `npm start` (or equivalent), does the server start immediately without crashing?
+#### `400 Bad Request` — Invalid body
 
-### 2. 📄 Documentation (Crucial)
-- [ ] **Architecture Diagram:** Did you include a visual Diagram (Flowchart or Sequence Diagram) in the README?
-- [ ] **README Swap:** Did you **DELETE** the original instructions (the problem brief) from this file and replace it with your own documentation?
-- [ ] **API Docs:** Is there a clear list of Endpoints and Example Requests in the README?
-
-
-### 3. 🧹 Git Hygiene
-- [ ] **Commit History:** Does your repo have multiple commits with meaningful messages? (A single "Initial Commit" is a red flag).
+```json
+{
+  "error": "amount must be > 0 and currency must not be empty"
+}
+```
 
 ---
-**Ready?**
-If you checked all the boxes above, submit your repository link in the application form. Good luck! 🚀
+
+### Testing All Scenarios
+
+```bash
+#  Scenario 1: First request (processes payment, ~2s delay) 
+curl -X POST http://localhost:8080/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: test-key-001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+
+#  Scenario 2: Duplicate request (instant, X-Cache-Hit: true) 
+curl -X POST http://localhost:8080/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: test-key-001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+
+#  Scenario 3: Same key, different body (409 Conflict)
+curl -X POST http://localhost:8080/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: test-key-001" \
+  -d '{"amount": 500, "currency": "GHS"}'
+
+# Scenario 4: Missing header (400 Bad Request)
+curl -X POST http://localhost:8080/process-payment \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100, "currency": "GHS"}'
+
+# Scenario 5: Race condition (send two requests simultaneously)
+curl -X POST http://localhost:8080/process-payment \
+  -H "Idempotency-Key: race-key-001" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 250, "currency": "GHS"}' &
+
+curl -X POST http://localhost:8080/process-payment \
+  -H "Idempotency-Key: race-key-001" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 250, "currency": "GHS"}' &
+
+wait
+# Both return 201. Only one 2s delay. Second has X-Cache-Hit: true.
+```
+
+---
+
+## Design Decisions
+
+### Why the store is behind an interface
+`middleware` and `handlers` only ever call the `store.Store` interface — they have no idea there's a map underneath. This means swapping to Redis or Postgres is one file (`store/redis.go`) and one line change in `main.go`. Everything else stays the same.
+
+### Why `sync.Cond` for race conditions
+The naive solution for the in-flight race condition is a polling loop with `time.Sleep`. That wastes CPU and adds latency. A `sync.Cond` (condition variable) is the idiomatic Go solution — Request B parks itself on `cond.Wait()` and consumes zero CPU until Request A calls `cond.Broadcast()` when it finishes. Exact same result, no polling.
+
+### Why SHA-256 for body hashing
+Body comparison is how we detect conflicts (same key, different payload). Comparing raw bytes works but storing full request bodies in memory is wasteful — especially for large payloads. A SHA-256 hash is 32 bytes regardless of input size, is collision-resistant, and is in the standard library with no extra imports.
+
+### Why `responseRecorder` wraps the ResponseWriter
+The standard `http.ResponseWriter` is write-only — once you write to it, you can't read back what was written. The middleware needs to cache the handler's response so it can replay it on duplicate requests. `responseRecorder` solves this by tee-ing the writes: bytes go to both the real writer (client gets the response) and an internal buffer (we get the bytes to cache).
+
+### Why 201 Created instead of 200 OK
+A payment creates a new transaction record. HTTP semantics say `201 Created` is correct for resource creation. Duplicate requests return the same `201` — because we're replaying the original response, not describing the current state.
+
+---
+
+## Developer's Choice Feature
+
+### Automatic Key Expiry (TTL Sweeper)
+
+**What it is:** A background goroutine that periodically scans the in-memory store and evicts idempotency keys older than a configured TTL (default: 24 hours).
+
+**Why it matters:** Without expiry, every key ever used stays in memory forever. In a real payment system processing thousands of transactions per day, this is a slow memory leak that eventually crashes the server. Stripe's idempotency keys expire after 24 hours — this matches that behaviour.
+
+**How it works:**
+- `store.NewMemoryStore(ttl)` takes the TTL as a parameter
+- `memStore.StartSweeper()` in `main.go` fires a goroutine that ticks every 10 minutes
+- On each tick, `sweep()` iterates the map, compares `entry.CreatedAt` against `time.Now()`, and deletes expired entries
+- The sweeper logs how many keys it evicted each run
+
+**Configuration:** TTL and sweep interval are in `config/config.go`. Setting `KeyTTL: 1 * time.Minute` is useful for testing expiry without waiting 24 hours.
+
+---
+
+## Project Structure
+
+```
+idempotency-gateway/
+├── main.go                  # Entry point — wires everything, starts server
+├── go.mod                   # Module definition (zero external dependencies)
+├── config/
+│   └── config.go            # Port, delays, TTL — all tuneable values live here
+├── models/
+│   └── models.go            # Shared types: PaymentRequest, CachedEntry, KeyState
+├── store/
+│   ├── store.go             # Store interface (makes future DB swap clean)
+│   └── memory.go            # In-memory implementation with RWMutex + sync.Cond
+├── middleware/
+│   └── idempotency.go       # Core idempotency logic — intercepts every request
+└── handlers/
+    └── payment.go           # Payment handler — stays clean, knows nothing about keys
+```
