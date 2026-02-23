@@ -754,7 +754,7 @@
         </div>
 
         <script>
-            const API = "http://localhost:8080";
+            const API = window.location.origin;
             let currentScenario = "happy";
             let lastKey = ""; // used by the cache/conflict scenarios to reuse a key
             let history = [];
